@@ -152,7 +152,7 @@ class SimplePhaseOperator(QuantumOperator):
             target_phase: Fase objetivo ϕ (en radianes)
         """
         self.target_phase = target_phase
-        self._eigenstate = np.array([1.0, 0.0]) / np.sqrt(2)  # |+⟩
+        self._eigenstate = np.array([1.0, 1.0]) / np.sqrt(2)  # |+⟩
     
     def apply(self, eigenstate: np.ndarray, power: int) -> Tuple[np.ndarray, float]:
         """Aplicar U^(2^power)."""
