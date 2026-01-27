@@ -1,6 +1,7 @@
+ <html> <img align="center" width="250" height="250"  alt="awq2" src="https://github.com/user-attachments/assets/915b4910-0994-491b-8f58-7724cec97364" /> PROTOCOLO AWQPE - QuoreMind
+ </html>
 
-#  PROTOCOLO AWQPE - COMPLETO 
-![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54) ![GitHub last commit](https://img.shields.io/github/last-commit/jakobmina/AWQPE) ![GitHub license](https://img.shields.io/github/license/jakobmina/AWQPE) ![GitHub stars](https://img.shields.io/github/stars/jakobmina/AWQPE?style=social) ![GitHub forks](https://img.shields.io/github/forks/jakobmina/AWQPE?style=social) ![GitHub repo size](https://img.shields.io/github/repo-size/jakobmina/AWQPE)
+![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54) ![GitHub last commit](https://img.shields.io/github/last-commit/jakobmina/AWQPE) ![GitHub license](https://img.shields.io/github/license/jakobmina/AWQPE) ![GitHub stars](https://img.shields.io/github/stars/jakobmina/AWQPE?style=social) ![GitHub forks](https://img.shields.io/github/forks/jakobmina/AWQPE?style=social) ![GitHub repo size](https://img.shields.io/github/repo-size/jakobmina/AWQPE) ![Estado](https://img.shields.io/badge/Estado-Terminado-green)
 ## ============================================
 
 ### ¡Bienvenido! Este repositorio contiene una implementación profesional y rigurosa
