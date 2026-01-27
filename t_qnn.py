@@ -10,6 +10,7 @@ CARACTERÍSTICAS:
   - AWQPE: Estimación adaptativa de momento
   - Integración: Resolución de ambigüedad + recuperación topológica
   - Validación: Coherencia física automática
+  - Metodología: Bayesiana con Distancia de Mahalanobis y Cosenos Directores
 
 EQUIVALENCIA CONCEPTUAL:
   AWQPE phase estimation    ↔    T-QNN moment identification
@@ -18,9 +19,25 @@ EQUIVALENCIA CONCEPTUAL:
 """
 
 import numpy as np
-from typing import Tuple, List, Dict, Optional
+import tensorflow as tf
+import tensorflow_probability as tfp
+from typing import Tuple, List, Dict, Optional, Any, Callable
 from dataclasses import dataclass
 from enum import Enum
+from scipy.spatial.distance import mahalanobis
+from sklearn.covariance import EmpiricalCovariance
+
+
+# ============================================================================
+# UTILIDADES ÁUREAS Y MATEMÁTICAS
+# ============================================================================
+
+def golden_ratio_operator(n: int, phi: float = 1.6180339887) -> Tuple[float, float]:
+    """Calcula paridad y fase del operador áureo Ô_n para estabilización."""
+    n_float = float(n)
+    paridad = np.cos(np.pi * n_float)
+    fase_mod = np.cos(np.pi * phi * n_float)
+    return paridad, fase_mod
 
 
 # ============================================================================
@@ -40,8 +57,8 @@ class PhaseToMomentMapper:
         # Fases asociadas a cada momento
         # Por convención: momento i está en la fase 2πi/num_moments
         self.moment_phases = [
-            (2 * np.pi * i) / num_moments 
-            for i in range(num_moments)
+            (2 * np.pi * i) / self.num_moments
+            for i in range(self.num_moments)
         ]
     
     def phase_to_moment(self, phase: float) -> Tuple[int, float]:
@@ -93,12 +110,12 @@ class PhaseToMomentMapper:
 
 
 # ============================================================================
-# MÓDULO: RESOLUCIÓN TOPOLÓGICA DE AMBIGÜEDAD
+# MÓDULO: RESOLUCIÓN TOPOLÓGICA DE AMBIGÜEDAD (BAYES + MAHALANOBIS)
 # ============================================================================
 
 @dataclass
 class TopologicalAmbiguityInfo:
-    """Información de ambigüedad en contexto topológico."""
+    """Información de ambigüedad en contexto topológico con métricas avanzadas."""
     
     moment_id: int              # Momento detectado
     candidates: List[str]       # Estados candidatos dentro del momento
@@ -107,27 +124,31 @@ class TopologicalAmbiguityInfo:
     ambiguity_ratio: float      # Ratio entre top2/top1
     correlation_with_previous: Optional[float] = None  # Correlación con anterior
     confidence: float = 0.0     # Confianza general
+    mahalanobis_distances: Optional[Dict[str, float]] = None # Distancias de Mahalanobis
+    cosines: Optional[Tuple[float, float, float]] = None     # Cosenos directores (x,y,z)
+    entropy: float = 0.0        # Entropía de Shannon del histograma
 
 
 class TopologicalAmbiguityResolver:
-    """Resuelve ambigüedad dentro de momentos usando estructura topológica."""
+    """Resuelve ambigüedad dentro de momentos usando estructura topológica y Bayes."""
     
     # Mapeo de momentos a estados permitidos en T-QNN
+    # Nota: 1,6 (001, 110), 2,5 (010, 101), 3,4 (011, 100)
     MOMENT_TO_STATES = {
-        0: ['001', '010'],    # Momento-1
-        1: ['011', '100'],    # Momento-2
-        2: ['101', '110'],    # Momento-3
+        0: ['001', '110'],    # Momento-1 (Estados 1 y 6)
+        1: ['010', '101'],    # Momento-2 (Estados 2 y 5)
+        2: ['011', '100'],    # Momento-3 (Estados 3 y 4)
     }
     
     def __init__(self):
-        """Inicializar resolver con mapeo de momentos."""
+        """Inicializar resolver con mapeo de momentos y estimador de covarianza."""
         self.transition_matrix = self._build_transition_matrix()
+        self.covariance_estimator = EmpiricalCovariance()
+        self.aureo_step = 1
     
     def _build_transition_matrix(self) -> np.ndarray:
         """
         Construir matriz de transición entre momentos.
-        
-        Basada en topología: P(M_i → M_j) depende de correlación.
         """
         n_moments = 3
         matrix = np.zeros((n_moments, n_moments))
@@ -145,6 +166,65 @@ class TopologicalAmbiguityResolver:
             matrix[i, prev] = 0.15
         
         return matrix
+
+    def _calculate_cosines(self, entropy: float, coherence: float) -> Tuple[float, float, float]:
+        """Calcula los cosenos directores (x, y, z) para un vector de estado 3D."""
+        epsilon = 1e-6
+        entropy = max(entropy, epsilon)
+        coherence = max(coherence, epsilon)
+        magnitude = np.sqrt(entropy ** 2 + coherence ** 2 + 1)
+        cos_x = entropy / magnitude
+        cos_y = coherence / magnitude
+        cos_z = 1 / magnitude
+        return cos_x, cos_y, cos_z
+
+    def _get_inverse_covariance(self, data: np.ndarray) -> np.ndarray:
+        """Retorna la inversa de la matriz de covarianza de los datos."""
+        if data.ndim != 2:
+            data = data.reshape(-1, 1)
+        self.covariance_estimator.fit(data)
+        cov_matrix = self.covariance_estimator.covariance_
+        try:
+            inv_cov_matrix = np.linalg.inv(cov_matrix)
+        except np.linalg.LinAlgError:
+            inv_cov_matrix = np.linalg.pinv(cov_matrix)
+        return inv_cov_matrix
+
+    def _calculate_mahalanobis_distances(
+        self,
+        measurement_histogram: Dict[str, int],
+        candidates: List[str]
+    ) -> Dict[str, float]:
+        """Calcula distancias de Mahalanobis para los candidatos permitidos."""
+        # Generar datos sintéticos basados en el histograma para estimar la dispersión
+        shots = []
+        for state, count in measurement_histogram.items():
+            val = int(state, 2)
+            shots.extend([val] * count)
+
+        if not shots:
+            return {c: 10.0 for c in candidates}
+
+        data = np.array(shots).reshape(-1, 1)
+        inv_cov = self._get_inverse_covariance(data)
+        mean_val = np.mean(data)
+
+        distances = {}
+        for cand in candidates:
+            cand_val = int(cand, 2)
+            diff = cand_val - mean_val
+            # Distancia de Mahalanobis: sqrt( (x-mu)^T InvCov (x-mu) )
+            d = np.sqrt(diff * inv_cov[0, 0] * diff)
+            distances[cand] = float(d)
+
+        return distances
+
+    def _calculate_entropy(self, probabilities: List[float]) -> float:
+        """Calcula la entropía de Shannon de una distribución."""
+        probs = np.array(probabilities)
+        probs = probs[probs > 0]
+        if len(probs) == 0: return 0.0
+        return -np.sum(probs * np.log2(probs))
     
     def resolve(
         self,
@@ -153,46 +233,65 @@ class TopologicalAmbiguityResolver:
         previous_moment: Optional[int] = None
     ) -> TopologicalAmbiguityInfo:
         """
-        Resolver ambigüedad dentro del momento.
+        Resolver ambigüedad dentro del momento usando Bayes y Mahalanobis.
         
         Args:
             moment_id: Momento identificado
             measurement_histogram: Histograma de mediciones
-            previous_moment: Momento anterior (para correlación)
+            previous_moment: Momento anterior (para el prior de transición)
         
         Returns:
-            TopologicalAmbiguityInfo con resolución
+            TopologicalAmbiguityInfo con resolución avanzada
         """
         
         # Candidatos permitidos para este momento
         candidates = self.MOMENT_TO_STATES[moment_id]
-        
-        # Calcular distribución de probabilidad
         total_counts = sum(measurement_histogram.values())
-        prob_dist = {
-            state: measurement_histogram.get(state, 0) / total_counts
-            for state in candidates
-        }
         
-        # Top candidatos
-        top_candidates = sorted(
-            prob_dist.items(),
-            key=lambda x: -x[1]
-        )
+        # 1. Likelihood basado en Mahalanobis
+        mahal_dists = self._calculate_mahalanobis_distances(measurement_histogram, candidates)
+        likelihoods = {s: np.exp(-mahal_dists[s]) for s in candidates}
+
+        # 2. Prior Bayesiano
+        # P(Momento) basado en la transición desde el momento anterior
+        if previous_moment is not None:
+            prior_transition = self.transition_matrix[previous_moment, moment_id]
+        else:
+            prior_transition = 1.0 / 3.0
+
+        # 3. Posterior P(Estado | Medición)
+        # Combinamos frecuencia observada, verosimilitud de Mahalanobis y prior de transición
+        raw_probs = {}
+        for s in candidates:
+            freq = measurement_histogram.get(s, 0) / (total_counts + 1e-10)
+            # Regla de Bayes simplificada
+            raw_probs[s] = (freq + 1e-6) * likelihoods[s] * prior_transition
+
+        # Normalización
+        sum_probs = sum(raw_probs.values())
+        prob_dist = {s: p / sum_probs for s, p in raw_probs.items()}
+
+        # 4. Cálculo de Cosenos y Entropía
+        entropy = self._calculate_entropy(list(prob_dist.values()))
+        top_candidates = sorted(prob_dist.items(), key=lambda x: -x[1])
         
-        # Ambiguity ratio (2do / 1ero)
+        # Coherencia estimada a partir de la dominancia del top candidato
+        coherence = top_candidates[0][1] if top_candidates else 0.0
+        cosines = self._calculate_cosines(entropy, coherence)
+
+        # 5. Ratio de Ambigüedad y Confianza
         if len(top_candidates) >= 2:
             ambiguity_ratio = top_candidates[1][1] / (top_candidates[0][1] + 1e-10)
         else:
             ambiguity_ratio = 0.0
         
-        # Confianza: invertido de ambiguity_ratio
-        confidence = 1.0 - min(ambiguity_ratio, 1.0)
+        # Confianza modulada por el coseno director Z (estabilidad)
+        confidence = (1.0 - min(ambiguity_ratio, 1.0)) * cosines[2]
         
-        # Correlación con momento anterior
-        correlation = None
-        if previous_moment is not None:
-            correlation = self.transition_matrix[previous_moment, moment_id]
+        correlation = self.transition_matrix[previous_moment, moment_id] if previous_moment is not None else None
+
+        # Incrementar paso áureo
+        self.aureo_step += 1
         
         return TopologicalAmbiguityInfo(
             moment_id=moment_id,
@@ -201,7 +300,10 @@ class TopologicalAmbiguityResolver:
             top_candidates=top_candidates,
             ambiguity_ratio=ambiguity_ratio,
             correlation_with_previous=correlation,
-            confidence=confidence
+            confidence=float(confidence),
+            mahalanobis_distances=mahal_dists,
+            cosines=cosines,
+            entropy=float(entropy)
         )
     
     def recover_likely_state(
@@ -210,17 +312,10 @@ class TopologicalAmbiguityResolver:
     ) -> str:
         """
         Recuperar estado más probable dentro del momento.
-        
-        Args:
-            ambiguity_info: Información de ambigüedad
-        
-        Returns:
-            Estado más probable (ej: '011')
         """
         if ambiguity_info.top_candidates:
             return ambiguity_info.top_candidates[0][0]
         else:
-            # Fallback: devolver primer candidato
             return ambiguity_info.candidates[0]
 
 
@@ -240,13 +335,7 @@ class T_QNN_MeasurementResult:
 
 class TopologicalQNN_AWQPE:
     """
-    Red neuronal cuántica topológica mejorada con AWQPE.
-    
-    Características:
-    - 3 qubits de datos (6 estados permitidos)
-    - 3 momentos identificables
-    - Resolución automática de ambigüedad (topológica)
-    - Validación de coherencia
+    Red neuronal cuántica topológica mejorada con AWQPE y Bayes/Mahalanobis.
     """
     
     def __init__(self, coherence_time: float = 1e-3):
@@ -270,25 +359,11 @@ class TopologicalQNN_AWQPE:
         input_features: np.ndarray
     ) -> np.ndarray:
         """
-        Simular medición cuántica (fase estimada).
-        
-        Nota: En implementación real, esto vendría del protocolo AWQPE.
-        Aquí simulamos para demostración.
-        
-        Args:
-            input_features: Features de entrada (3 valores en [0, 2π])
-        
-        Returns:
-            Fase estimada
+        Simular fase estimada (AWQPE).
         """
-        # Sumar features ponderadas (simulación simplificada)
         phase = np.sum(input_features * np.pi) / len(input_features)
-        
-        # Agregar ruido gaussiano pequeño
         noise = np.random.normal(0, 0.1)
         noisy_phase = phase + noise
-        
-        # Normalizar a [-π, π]
         return np.angle(np.exp(1j * noisy_phase))
     
     def generate_measurement_histogram(
@@ -298,32 +373,18 @@ class TopologicalQNN_AWQPE:
     ) -> Dict[str, int]:
         """
         Generar histograma de mediciones para un momento.
-        
-        Args:
-            true_moment: Momento verdadero (0, 1, 2)
-            shots: Número de shots
-        
-        Returns:
-            {estado: counts}
         """
         candidates = self.ambiguity_resolver.MOMENT_TO_STATES[true_moment]
         
-        # Distribución sesgada hacia el estado "verdadero"
+        # Distribución sesgada
         if true_moment == 0:
-            probs = [0.6, 0.4]  # Favorece '001'
+            probs = [0.65, 0.35]
         elif true_moment == 1:
-            probs = [0.55, 0.45]  # Favorece '011' ligeramente
-        else:  # true_moment == 2
-            probs = [0.5, 0.5]  # Equiprobable
+            probs = [0.6, 0.4]
+        else:
+            probs = [0.55, 0.45]
         
-        # Muestrear
-        state_choices = np.random.choice(
-            candidates,
-            size=shots,
-            p=probs
-        )
-        
-        # Contar
+        state_choices = np.random.choice(candidates, size=shots, p=probs)
         histogram = {}
         for state in state_choices:
             histogram[state] = histogram.get(state, 0) + 1
@@ -337,104 +398,73 @@ class TopologicalQNN_AWQPE:
         shots: int = 1024
     ) -> T_QNN_MeasurementResult:
         """
-        Ejecutar medición completa de momento (con AWQPE logic).
-        
-        Args:
-            input_features: Features de entrada
-            true_moment: Momento verdadero (si se conoce, para simulación)
-            shots: Número de shots cuánticos
-        
-        Returns:
-            T_QNN_MeasurementResult con momento, estado, y confianza
+        Ejecutar medición completa de momento.
         """
-        
-        # Paso 1: Simular fase estimada (simulación de AWQPE)
+        # 1. Simular fase
         phase_estimate = self.simulate_measurement(input_features)
         
-        # Paso 2: Mapear fase a momento (Phase Estimation)
+        # 2. Mapear a momento
         moment_id, phase_distance = self.phase_mapper.phase_to_moment(phase_estimate)
         
-        # Paso 3: Generar histograma de mediciones (Quantum Circuit Execution)
-        measurement_histogram = self.generate_measurement_histogram(
-            moment_id,
-            shots=shots
-        )
+        # 3. Generar histograma
+        measurement_histogram = self.generate_measurement_histogram(moment_id, shots=shots)
         
-        # Paso 4: Resolver ambigüedad (Ambiguity Resolution)
+        # 4. Resolver con Bayes + Mahalanobis
         previous_moment = self.moment_history[-1] if self.moment_history else None
-        
         ambiguity_info = self.ambiguity_resolver.resolve(
             moment_id=moment_id,
             measurement_histogram=measurement_histogram,
             previous_moment=previous_moment
         )
         
-        # Paso 5: Recuperar estado probable (Topological Recovery)
+        # 5. Recuperar estado
         likely_state = self.ambiguity_resolver.recover_likely_state(ambiguity_info)
         
-        # Paso 6: Calcular confianza final
-        # Combina: momento clarity + state clarity + coherence
+        # 6. Confianza final combinada
         moment_clarity = 1.0 - phase_distance / np.pi
-        state_clarity = ambiguity_info.confidence
+        final_confidence = (moment_clarity + ambiguity_info.confidence) / 2.0
         
-        final_confidence = (moment_clarity + state_clarity) / 2.0
-        
-        # Validar coherencia
-        # Error esperado = 1 / (2^precision_bits)
-        expected_error = 1.0 / (2**3)  # 3 qubits
-        coherence_margin = self.coherence_time * expected_error
-        
-        if phase_distance > coherence_margin:
-            final_confidence *= 0.9  # Penalizar si fase está lejos
-        
-        # Actualizar historial
+        # Aplicar operador áureo para estabilización de confianza
+        paridad, _ = golden_ratio_operator(self.ambiguity_resolver.aureo_step)
+        if paridad < 0:
+            final_confidence *= 0.95 # Penalización por paridad negativa
+
         self.moment_history.append(moment_id)
         
         return T_QNN_MeasurementResult(
             moment_id=moment_id,
             likely_state=likely_state,
-            confidence=final_confidence,
+            confidence=float(final_confidence),
             ambiguity_info=ambiguity_info
         )
     
-    def classify(
-        self,
-        input_features: np.ndarray,
-        shots: int = 1024
-    ) -> Tuple[int, str, float]:
-        """
-        Ejecutar clasificación completa (end-to-end).
-        
-        Args:
-            input_features: Features de entrada
-            shots: Shots cuánticos por medición
-        
-        Returns:
-            (moment_id, likely_state, confidence)
-        """
+    def classify(self, input_features: np.ndarray, shots: int = 1024) -> Tuple[int, str, float]:
         result = self.measure_moment(input_features, shots=shots)
         return result.moment_id, result.likely_state, result.confidence
     
     def generate_report(self, result: T_QNN_MeasurementResult) -> str:
-        """Generar reporte detallado de la medición."""
+        """Generar reporte detallado de la medición con métricas avanzadas."""
         report = "\n" + "="*70 + "\n"
-        report += "T-QNN + AWQPE MEASUREMENT REPORT\n"
+        report += "T-QNN + AWQPE ADVANCED BAYESIAN REPORT\n"
         report += "="*70 + "\n\n"
         
         report += f"Momento identificado: {result.moment_id}\n"
         report += f"Estado probable: {result.likely_state}\n"
-        report += f"Confianza general: {result.confidence:.4f}\n\n"
+        report += f"Confianza Bayesiana: {result.confidence:.4f}\n\n"
         
         if result.ambiguity_info:
             info = result.ambiguity_info
-            report += f"Candidatos en momento {result.moment_id}: {info.candidates}\n"
-            report += f"Distribución de probabilidad:\n"
+            report += f"Distribución de Posterior Bayesiana:\n"
             for state, prob in info.probability_distribution.items():
-                report += f"  {state}: {prob:.4f}\n"
-            report += f"\nRatio de ambigüedad: {info.ambiguity_ratio:.4f}\n"
+                dist = info.mahalanobis_distances.get(state, 0)
+                report += f"  {state}: {prob:.4f} (Dist. Mahalanobis: {dist:.4f})\n"
             
-            if info.correlation_with_previous is not None:
-                report += f"Correlación con momento anterior: {info.correlation_with_previous:.4f}\n"
+            report += f"\nEntropía del sistema: {info.entropy:.4f}\n"
+            if info.cosines:
+                cx, cy, cz = info.cosines
+                report += f"Cosenos Directores (x, y, z): ({cx:.3f}, {cy:.3f}, {cz:.3f})\n"
+
+            report += f"Ratio de ambigüedad: {info.ambiguity_ratio:.4f}\n"
         
         report += "\n" + "="*70 + "\n"
         return report
@@ -445,58 +475,25 @@ class TopologicalQNN_AWQPE:
 # ============================================================================
 
 def example_integration():
-    """Demostración de T-QNN + AWQPE."""
+    """Demostración de T-QNN + AWQPE con la nueva metodología."""
     
     print("\n" + "#"*70)
-    print("# T-QNN + AWQPE INTEGRATION EXAMPLE")
+    print("# T-QNN + AWQPE ADVANCED METHODOLOGY (BAYES + MAHALANOBIS)")
     print("#"*70 + "\n")
     
-    # Crear QNN
-    qnn = TopologicalQNN_AWQPE(coherence_time=1e-3)
+    qnn = TopologicalQNN_AWQPE()
     
-    # Ejemplo 1: Medir momento 0
-    print("EJEMPLO 1: Clasificación para Momento-0\n")
+    # Simular secuencia de momentos
+    test_cases = [
+        (np.array([0.5, 0.3, 0.2]), 0),
+        (np.array([1.5, 1.3, 1.2]), 1),
+        (np.array([2.5, 2.3, 2.2]), 2)
+    ]
     
-    input_features = np.array([0.5, 0.3, 0.2])  # Features de entrada
-    result = qnn.measure_moment(input_features, true_moment=0, shots=1024)
-    
-    print(qnn.generate_report(result))
-    
-    # Ejemplo 2: Medir momento 1
-    print("\nEJEMPLO 2: Clasificación para Momento-1\n")
-    
-    input_features = np.array([1.5, 1.3, 1.2])
-    result = qnn.measure_moment(input_features, true_moment=1, shots=1024)
-    
-    print(qnn.generate_report(result))
-    
-    # Ejemplo 3: Medir momento 2
-    print("\nEJEMPLO 3: Clasificación para Momento-2\n")
-    
-    input_features = np.array([2.5, 2.3, 2.2])
-    result = qnn.measure_moment(input_features, true_moment=2, shots=1024)
-    
-    print(qnn.generate_report(result))
-    
-    # Batches: Múltiples clasificaciones
-    print("\n" + "#"*70)
-    print("# BATCH CLASSIFICATION: 10 Samples")
-    print("#"*70 + "\n")
-    
-    qnn_reset = TopologicalQNN_AWQPE()
-    
-    results = []
-    for i in range(10):
-        # Feature aleatorio en [0, 2π]
-        features = np.random.uniform(0, 2*np.pi, 3)
-        moment, state, conf = qnn_reset.classify(features, shots=1024)
-        results.append((moment, state, conf))
-        print(f"Sample {i}: Moment={moment}, State={state}, Confidence={conf:.4f}")
-    
-    # Estadísticas
-    moments = [r[0] for r in results]
-    print(f"\nDistribución de momentos: {np.bincount(moments, minlength=3).tolist()}")
-    print(f"Confianza promedio: {np.mean([r[2] for r in results]):.4f}")
+    for i, (features, t_mom) in enumerate(test_cases):
+        print(f"TEST CASE {i+1}: Objetivo Momento {t_mom}")
+        result = qnn.measure_moment(features, shots=1024)
+        print(qnn.generate_report(result))
 
 
 if __name__ == "__main__":
