@@ -17,6 +17,14 @@ from awqpe_protocol import (
     AWQPEProtocol
 )
 
+def circular_error(target, estimate, period=2*np.pi):
+    """
+    Cálculo de error circular (Fisica Metripléptica).
+    Mide la distancia mínima en un círculo de radio 'period'.
+    """
+    diff = abs(target - estimate) % period
+    return min(diff, period - diff)
+
 
 def print_header(title):
     """Imprimir encabezado formateado."""
@@ -73,7 +81,8 @@ def example_1_basic_phase_estimation():
     print("ANÁLISIS DE RESULTADO:")
     print("-" * 80)
     
-    error_abs = abs(target_phase - result.phase_estimate)
+    # Error Circular Metripléptico (Residuo de 0.72 rad)
+    error_abs = circular_error(target_phase, result.phase_estimate)
     error_rel = error_abs / abs(target_phase) * 100 if target_phase != 0 else 0
     
     print(f"\nComparación:")
@@ -141,7 +150,7 @@ def example_2_berry_phase_estimation():
     print("ANÁLISIS DE RESULTADO:")
     print("-" * 80)
     
-    error = abs(theoretical_phase - result.phase_estimate)
+    error = circular_error(theoretical_phase, result.phase_estimate)
     rel_error = error / theoretical_phase * 100
     
     print(f"\nComparación:")
@@ -191,7 +200,7 @@ def example_3_parameter_sensitivity():
         protocol = AWQPEProtocol(config, operator)
         result = protocol.run(verbose=False)
         
-        error = abs(target_phase - result.phase_estimate)
+        error = circular_error(target_phase, result.phase_estimate)
         results_comparison.append((config_dict, result, error))
         
         print(f"\nConfig {i+1}:")
@@ -253,7 +262,7 @@ def example_4_multiple_phases():
         protocol = AWQPEProtocol(config, operator)
         result = protocol.run(verbose=False)
         
-        error = abs(phase - result.phase_estimate)
+        error = circular_error(phase, result.phase_estimate)
         results.append((phase, result.phase_estimate, error))
         
         print(f"  ϕ = {phase:.2f}: estimado = {result.phase_estimate:.6f}, "

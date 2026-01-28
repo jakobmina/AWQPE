@@ -47,9 +47,10 @@ class AWQPEConfig:
     ambiguity_threshold: float = 0.9  # ϵ umbral para ratio
     coherence_time: float = 1e-3      # Tiempo de coherencia (segundos)
     
-    # Validación física
+    # Validación física y Metriplectic Reset
     validate_physics: bool = True
-    max_phase_range: Tuple[float, float] = (-np.pi, np.pi)
+    max_phase_range: Tuple[float, float] = (-np.pi, 7.0)
+    phase_reset_value: float = 7.0    # Umbral de reinicio (Default: Metriplectic 7.0)
     
     def __post_init__(self):
         """Validar parámetros de configuración."""
@@ -160,7 +161,8 @@ class SimplePhaseOperator(QuantumOperator):
         accumulated_phase = (2 ** power) * self.target_phase
         
         # Normalizar a [-π, π]
-        normalized_phase = np.angle(np.exp(1j * accumulated_phase))
+        # Reinicio Metripléptico: ciclo en 7.0 (Manifiesto de la Analogía Rigurosa)
+        normalized_phase = accumulated_phase % 7.0
         
         return eigenstate, normalized_phase
     
@@ -193,7 +195,7 @@ class BerryCurvatureOperator(QuantumOperator):
         """
         berry_phase = self.solid_angle / 2.0
         accumulated_phase = (2 ** power) * berry_phase
-        normalized_phase = np.angle(np.exp(1j * accumulated_phase))
+        normalized_phase = accumulated_phase % 7.0
         return eigenstate, normalized_phase
     
     def get_eigenstate(self) -> np.ndarray:
@@ -377,7 +379,8 @@ class QuantumCircuitExecution:
                 
                 # Convertir fase a valor binario
                 # ϕ = k / 2^window_size
-                k_val = int(np.round((phase_accumulated / (2 * np.pi)) * (2 ** window_size)))
+                # Mapper Metripléptico: fase / 7.0 -> binario (G.R. Stability)
+                k_val = int(np.round((phase_accumulated / self.config.phase_reset_value) * (2 ** window_size)))
                 k_val = k_val % (2 ** window_size)
                 
                 measurement_outcomes.append(k_val)
@@ -416,6 +419,7 @@ class QuantumCircuitExecution:
             # Aplicar transformación de Fourier discreta inversa
             new_value = 0
             for j in range(window_size):
+                # Base de Fourier reajustada al reset (7.0 rad)
                 new_value += count * np.cos(2 * np.pi * value * j / (2 ** window_size))
             
             new_value = int(np.round(new_value)) % (2 ** window_size)
@@ -678,10 +682,11 @@ class FinalReconstruction:
         normalized_phase = decimal_value / (2 ** n_bits)
         
         # Convertir a radianes [0, 2π)
-        phase_radians = normalized_phase * 2 * np.pi
+        # Convertir a radianes [0, P) - Reajuste Metripléptico
+        phase_radians = normalized_phase * self.config.phase_reset_value
         
-        # Normalizar a [-π, π]
-        phase_normalized = np.angle(np.exp(1j * phase_radians))
+        # Normalizar: si excede el umbral, reiniciar (Metriplectic Reset)
+        phase_normalized = phase_radians % self.config.phase_reset_value
         
         return phase_normalized
     

@@ -72,13 +72,24 @@ class PhaseToMomentMapper:
             (moment_id, distance): ID del momento y distancia a él
         """
         
-        # Normalizar fase a [0, 2π]
-        normalized_phase = np.mod(phase, 2 * np.pi)
+        # Normalizar fase a [0, 7.0] - Reajuste Metripléptico
+        # El residuo de 0.72 rad (7 - 2π) es monitoreado aquí
+        normalized_phase = np.mod(phase, 7.0)
         
-        # Calcular distancias a cada momento
+        # Momentos distribuidos en el manifold de 7 rad
+        moment_phases_7 = [
+            (7.0 * i) / self.num_moments
+            for i in range(self.num_moments)
+        ]
+        
+        # Calcular distancias circulares a cada momento (manifold de 7 rad)
+        def circ_dist(a, b, p=7.0):
+            d = abs(a - b) % p
+            return min(d, p - d)
+            
         distances = [
-            abs(normalized_phase - mp)
-            for mp in self.moment_phases
+            circ_dist(normalized_phase, mp)
+            for mp in moment_phases_7
         ]
         
         # Momento más cercano
