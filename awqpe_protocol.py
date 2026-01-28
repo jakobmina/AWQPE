@@ -63,9 +63,17 @@ class AWQPEConfig:
     
     @property
     def num_windows(self) -> int:
-        """Calcular número de ventanas necesarias."""
-        return int(np.ceil(self.total_precision_bits / self.window_size))
-    
+        """
+        Número de ventanas con solapamiento de 1 bit.
+        """
+        if self.total_precision_bits <= self.window_size:
+            return 1
+            
+        effective_bits = self.window_size - 1
+        # k >= (T-S)/(S-1)
+        k_max = int(np.ceil((self.total_precision_bits - self.window_size) / effective_bits))
+        return k_max + 1
+
     @property
     def control_qubits_per_window(self) -> int:
         """Número de qubits de control por ventana."""
@@ -204,6 +212,48 @@ class BerryCurvatureOperator(QuantumOperator):
     @property
     def name(self) -> str:
         return f"BerryCurvature(Ω={self.solid_angle:.4f})"
+
+
+class MetriplecticCircuitOperator(QuantumOperator):
+    """
+    Operador que modela el circuito Metripléptico del JSON.
+    Estructura: H_0 · CY_12 · Inc_1 · Z^-t_0 · Dec_1
+    """
+    
+    def __init__(self, time_parameter: float, phase_reset: float = 7.0):
+        self.time_parameter = time_parameter
+        self.phase_reset = phase_reset
+        # Autoestado sugerido: |+++> (superposición uniforme de 3 qubits)
+        self._eigenstate = np.ones(8) / np.sqrt(8)
+    
+    def apply(self, eigenstate: np.ndarray, power: int) -> Tuple[np.ndarray, float]:
+        """
+        Aplica el operador U^(2^power).
+        La fase dominante viene de Z^-t, modulada por el Operador Áureo (O_n).
+        """
+        phi_golden = (1 + np.sqrt(5)) / 2
+        n = self.time_parameter
+        
+        # Operador Áureo (Regla 2.1: Fondo Estructurado)
+        o_n = np.cos(np.pi * n) * np.cos(np.pi * phi_golden * n)
+        
+        # Fase base del ciclo modulada por el vacío estructurado
+        base_phase = (self.time_parameter * self.phase_reset) * o_n
+        
+        # Fase acumulada para 2^power aplicaciones
+        accumulated_phase = base_phase * (2 ** power)
+        
+        # Normalizar al reset metripléptico
+        normalized_phase = accumulated_phase % self.phase_reset
+        
+        return eigenstate, normalized_phase
+    
+    def get_eigenstate(self) -> np.ndarray:
+        return self._eigenstate.copy()
+    
+    @property
+    def name(self) -> str:
+        return f"MetriplecticCircuit(t={self.time_parameter:.4f})"
 
 
 # ============================================================================
@@ -353,114 +403,100 @@ class QuantumCircuitExecution:
             "superposition_valid": np.isclose(np.linalg.norm(control_state), 1.0)
         }
     
-    def phase_kickback(self, block_index: int) -> BlockResult:
+    def phase_kickback(self, block_index: int) -> Tuple[float, int]:
         """
         II.2 Transferencia de Fase (Phase Kickback): Aplicar U^(2^k).
         
-        Aplica una secuencia de operaciones unitarias controladas U^(2^k+p),
-        codificando la fase en las amplitudes de los qubits de control.
+        Calcula la fase acumulada teórica para el bloque actual basada en 
+        las potencias U^(2^{offset+j}).
         
         Args:
             block_index: Índice del bloque actual
         
         Returns:
-            BlockResult con histograma de mediciones simuladas
+            Tupla (fase_objetivo_bloque, n_qubits_ventana)
         """
         window_size = self.config.window_size
+        control_qubits = self.config.control_qubits_per_window
+        
+        # Calcular offset de bits para este bloque (solapamiento de 1 bit)
+        bit_offset = block_index * (control_qubits - 1)
+        
+        # Determinar cuántos bits reales tiene este bloque
+        num_new_bits = control_qubits - 1
+        actual_bits = min(control_qubits, self.config.total_precision_bits - bit_offset)
+        
+        # Extraer fase del operador
         eigenstate = self.operator.get_eigenstate()
+        _, phase_u = self.operator.apply(eigenstate, 0) # Fase de U^1 (2^0)
         
-        # Simular mediciones para cada power k
-        measurement_outcomes = []
-        
-        for k in range(window_size):
-            for p in range(window_size):
-                power = k + p
-                _, phase_accumulated = self.operator.apply(eigenstate, power)
-                
-                # Convertir fase a valor binario
-                # ϕ = k / 2^window_size
-                # Mapper Metripléptico: fase / 7.0 -> binario (G.R. Stability)
-                k_val = int(np.round((phase_accumulated / self.config.phase_reset_value) * (2 ** window_size)))
-                k_val = k_val % (2 ** window_size)
-                
-                measurement_outcomes.append(k_val)
-        
-        # Construir histograma de mediciones (simulación clásica)
-        histogram = {}
-        for outcome in measurement_outcomes:
-            histogram[outcome] = histogram.get(outcome, 0) + 1
-        
-        # Normalizar a probabilidades
-        total_counts = len(measurement_outcomes)
-        
-        return histogram, total_counts
+        # La fase efectiva para este bloque es (phase_u * 2^bit_offset)
+        # En QPE, esto se mapea a bits binarios en el registro de la ventana
+        return phase_u, actual_bits, bit_offset
     
-    def inverse_qft(self, histogram: Dict, block_index: int) -> BlockResult:
+    def simulate_qpe_distribution(self, phase_u: float, m_bits: int, offset: int) -> Dict[int, float]:
         """
-        II.3 Transformación al Dominio de Frecuencia: Aplicar IQFT.
+        II.3 & II.4 Simulación de IQFT y Medición (Modelo Probabilístico).
         
-        La IQFT convierte las amplitudes codificadas en fase a estados
-        medibles en la base computacional.
+        Utiliza la fórmula teórica de QPE para la probabilidad de medir el estado |y>:
+        P(y) = |1/N * sum_{j=0}^{N-1} exp(2πi * (2^offset * φ * N - y) * j / N)|^2
+        donde φ = phase_u / phase_reset_value y N = 2^m_bits.
         
         Args:
-            histogram: Histograma de fase codificada
-            block_index: Índice del bloque
-        
-        Returns:
-            BlockResult después de IQFT
-        """
-        window_size = self.config.window_size
-        
-        # Simulación: IQFT es principalmente una reorganización
-        # En la práctica, sería una puerta cuántica
-        iqft_histogram = {}
-        
-        for value, count in histogram.items():
-            # Aplicar transformación de Fourier discreta inversa
-            new_value = 0
-            for j in range(window_size):
-                # Base de Fourier reajustada al reset (7.0 rad)
-                new_value += count * np.cos(2 * np.pi * value * j / (2 ** window_size))
+            phase_u: Fase base del operador U
+            m_bits: Número de qubits en la ventana
+            offset: Exponente de desplazamiento
             
-            new_value = int(np.round(new_value)) % (2 ** window_size)
-            iqft_histogram[new_value] = iqft_histogram.get(new_value, 0) + count
-        
-        return iqft_histogram
-    
-    def measure_and_collapse(self, block_index: int, iqft_histogram: Dict) -> BlockResult:
-        """
-        II.4 Colapso y Medición: Ejecutar circuito Nshots veces.
-        
-        Args:
-            block_index: Índice del bloque
-            iqft_histogram: Histograma después de IQFT
-        
         Returns:
-            BlockResult con estadísticas de medición
+            Diccionario de probabilidades {estado_binario: probabilidad}
         """
-        window_size = self.config.window_size
+        if m_bits <= 0:
+            return {0: 1.0}
+            
+        N = int(round(2 ** m_bits))
+        if N <= 0:
+            return {0: 1.0}
+            
+        phi = phase_u / self.config.phase_reset_value # Normalizar al manifold
+        
+        # Fase escalada que "ve" esta ventana
+        theta = (phi * (2 ** offset)) % 1.0
+        
+        probabilities = {}
+        for y in range(N):
+            # Caso ideal: y = round(theta * N)
+            if np.isclose(theta * N, y, atol=1e-9):
+                prob = 1.0
+            else:
+                # Amplitud de probabilidad estándar de QPE (Fórmula de Dirichlet Kernel)
+                delta = theta * N - y
+                # prob = |(1/N) * sin(πΔ) / sin(πΔ/N)|^2
+                prob = (np.sin(np.pi * delta) / (N * np.sin(np.pi * delta / N)))**2
+            
+            probabilities[y] = prob
+            
+        # Validar y normalizar (por errores numéricos)
+        total_p = sum(probabilities.values())
+        for y in probabilities:
+            probabilities[y] /= total_p
+            
+        return probabilities
+
+    def measure_and_collapse(self, probabilities: Dict[int, float]) -> Dict[int, int]:
+        """
+        Simulación estocástica de N shots.
+        """
         n_shots = self.config.n_shots
+        outcomes = list(probabilities.keys())
+        probs = list(probabilities.values())
         
-        # Construir distribución de probabilidad
-        total_counts = sum(iqft_histogram.values())
-        probabilities = {k: v / total_counts for k, v in iqft_histogram.items()}
+        measurements = np.random.choice(outcomes, size=n_shots, p=probs)
         
-        # Simular Nshots mediciones
-        measurements = np.random.choice(
-            list(probabilities.keys()),
-            size=n_shots,
-            p=list(probabilities.values())
-        )
-        
-        # Construir histograma final
-        final_histogram = {}
-        for measurement in measurements:
-            final_histogram[int(measurement)] = final_histogram.get(int(measurement), 0) + 1
-        
-        # Normalizar a probabilidades
-        final_probs = {k: v / n_shots for k, v in final_histogram.items()}
-        
-        return final_histogram, final_probs
+        histogram = {}
+        for m in measurements:
+            histogram[int(m)] = histogram.get(int(m), 0) + 1
+            
+        return histogram
     
     def execute_block(self, block_index: int) -> BlockResult:
         """
@@ -474,22 +510,23 @@ class QuantumCircuitExecution:
         Returns:
             BlockResult con estadísticas completas
         """
-        # II.1 Inicialización
-        init_result = self.initialize_qubits()
+        # II.1 Inicialización (Superposición de control)
+        _ = self.initialize_qubits()
         
-        # II.2 Phase Kickback
-        histogram, _ = self.phase_kickback(block_index)
+        # II.2 Phase Kickback (Teórico)
+        phase_u, m_bits, offset = self.phase_kickback(block_index)
         
-        # II.3 IQFT
-        iqft_histogram = self.inverse_qft(histogram, block_index)
+        # II.3 Simulación de IQFT
+        probabilities = self.simulate_qpe_distribution(phase_u, m_bits, offset)
         
-        # II.4 Medición
-        final_histogram, final_probs = self.measure_and_collapse(block_index, iqft_histogram)
+        # II.4 Medición y Colapso
+        final_histogram = self.measure_and_collapse(probabilities)
+        final_probs = {k: v / self.config.n_shots for k, v in final_histogram.items()}
         
         # Construir BlockResult
         top_candidates = sorted(final_probs.items(), key=lambda x: x[1], reverse=True)[:2]
         
-        phase_bits = format(top_candidates[0][0], f'0{self.config.window_size}b')
+        phase_bits = format(top_candidates[0][0], f'0{m_bits}b')
         
         ambiguity_ratio = (
             top_candidates[1][1] / top_candidates[0][1]
@@ -648,19 +685,26 @@ class FinalReconstruction:
     
     def concatenate_bits(self, bits_list: List[str]) -> str:
         """
-        IV.1 Concatenación: Unir cadenas de bits de cada ventana.
-        
-        Los bloques se concatenan desde LSB a MSB.
-        
-        Args:
-            bits_list: Lista de cadenas de bits (orden LSB a MSB)
-        
-        Returns:
-            Cadena de bits concatenada
+        IV.1 Concatenación: Bloque 0 es MSB (Powers 2^0, 2^1, ...).
+        Siguiendo el slide 9, las ventanas se concatenan con solapamiento.
         """
-        # Invertir orden para obtener MSB-LSB
-        phase_bits = ''.join(reversed(bits_list))
-        return phase_bits
+        if not bits_list:
+            return ""
+            
+        # El primer bloque (W0) es el más significativo (MSBs).
+        # Los bloques se solapan en 1 bit: LSB(W_i) == MSB(W_i+1).
+        # Para reconstruir, usamos el MSB de la ventana siguiente (que es más estable).
+        
+        full_bits = ""
+        for i in range(len(bits_list) - 1):
+            # Tomar todos los bits excepto el último (LSB de la ventana)
+            full_bits += bits_list[i][:-1]
+            
+        # Añadir el último bloque completo
+        full_bits += bits_list[-1]
+        
+        # Recortar si excede la precisión total (debido al solapamiento)
+        return full_bits[:self.config.total_precision_bits]
     
     def bits_to_phase(self, phase_bits: str) -> float:
         """
