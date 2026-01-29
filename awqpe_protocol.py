@@ -376,6 +376,13 @@ class SetupPhase:
 # ============================================================================
 
 class QuantumCircuitExecution:
+    """
+    MODIFICACIÓN SUGERIDA PARA QBRAID:
+    Se podría añadir un parámetro 'backend' en __init__ para pasarle
+    un backend de Qiskit/Qbraid. Las funciones como 'simulate_qpe_distribution'
+    y 'measure_and_collapse' serían reemplazadas por una única función que
+    construya y ejecute un circuito de Qiskit.
+    """
     """Encapsula la Fase de Ejecución del protocolo AWQPE."""
     
     def __init__(self, config: AWQPEConfig, operator: QuantumOperator):
