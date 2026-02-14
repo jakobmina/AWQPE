@@ -646,8 +646,8 @@ class FinalReconstruction:
             coherence_error = self.config.coherence_time / expected_precision
             
             if total_error > coherence_error:
-                warnings.warn(
                 import warnings
+                warnings.warn(
                     f"Error estimado ({total_error:.2e}) exceede coherencia ({coherence_error:.2e})"
                 )
         

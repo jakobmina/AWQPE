@@ -12,8 +12,8 @@ import numpy as np
 
 # Intento de importar módulos para ejecución en vivo
 try:
-    from examples.use_case_tqnn_integration import TopologicalQNN_AWQPE
-    from examples.use_case_confinement import QuantumConfinementModel
+    from examples.use_case_tqnn_integration import TopologicalQNN_AWQPE, example_integration
+    from examples.use_case_confinement import QuantumConfinementModel, main as confinement_main
 except ImportError:
     # Fallback si no están en el path
     pass
@@ -120,16 +120,10 @@ def run_t_qnn_sim():
     print(" --- EJECUTANDO SIMULACIÓN T-QNN + AWQPE INTEGRADA ---\n")
     print("[*] Inicializando Registros Cuánticos...")
     time.sleep(0.5)
-    print("[*] Configurando Resolver Bayesiano con Distancia de Mahalanobis...")
-    time.sleep(0.5)
-    
     try:
-        qnn = TopologicalQNN_AWQPE()
-        # Caso de prueba: Momento 1
-        features = np.array([1.5, 1.3, 1.2])
-        print(f"[*] Procesando Features: {features}")
-        result = qnn.measure_moment(features, shots=1024)
-        print(qnn.generate_report(result))
+        print("[*] Configurando Resolver Bayesiano con Distancia de Mahalanobis...")
+        time.sleep(0.5)
+        example_integration()
     except NameError:
         print("\033[1;31mError: El módulo t_qnn no pudo ser cargado.\033[0m")
     
@@ -142,9 +136,8 @@ def run_confinement_model():
     print(" --- EJECUTANDO MODELO DE CONFINAMIENTO CUÁNTICO (confinamiento.py) ---\n")
     
     try:
-        model = QuantumConfinementModel(verbose=True)
-        counts = model.run_simulation(shots=1024)
-        model.analyze_results(counts)
+        # Ejecutar la función principal del script de confinamiento
+        confinement_main()
     except NameError:
         print("\033[1;31mError: El módulo confinamiento no pudo ser cargado.\033[0m")
     except Exception as e:
