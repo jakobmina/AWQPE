@@ -1,9 +1,7 @@
 numpy
+qiskit
+qiskit-aer
 tensorflow
 tensorflow-probability
 scipy
 scikit-learn
-qiskit
-qiskit-aer
-pytest
-matplotlib

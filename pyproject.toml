@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "awqpe"
+version = "1.0.0"
+authors = [
+  { name="jakobmina" },
+]
+description = "Adaptive Windowed Quantum Phase Estimation Protocol"
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy",
+    "qiskit",
+    "qiskit-aer",
+    "tensorflow",
+    "tensorflow-probability",
+    "scipy",
+    "scikit-learn",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/jakobmina/AWQPE"
+"Bug Tracker" = "https://github.com/jakobmina/AWQPE/issues"
